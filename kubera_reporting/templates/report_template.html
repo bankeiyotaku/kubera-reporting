@@ -117,7 +117,7 @@
 
         <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
             <div style="color: #666; font-size: 14px; margin-bottom: 5px;">Net worth</div>
-            <div style="font-size: 32px; font-weight: bold; color: #333;">{{ format_net_worth(current.net_worth) }}</div>
+            <div style="font-size: 32px; font-weight: bold; color: #333;">{{ format_net_worth(current_net_worth) }}</div>
             {% if net_worth_change %}
             {% set change_text, change_color = format_change(net_worth_change, net_worth_change_percent) %}
             <div style="font-size: 18px; font-weight: 600; margin-top: 5px; color: {{ change_color }};">{{ change_text }}</div>
@@ -131,7 +131,7 @@
                     Assets
                 </div>
                 <div class="section-header-total" style="display: table-cell; vertical-align: middle; text-align: right; font-size: 16px; font-weight: 600; white-space: nowrap;">
-                    <div>Total: {{ format_money(current.total_assets) }}</div>
+                    <div>Total: {{ format_money(current_total_assets) }}</div>
                     {% if previous and total_asset_change %}
                     {% set change_text, change_color = format_change({'amount': total_asset_change, 'currency': current.currency}, total_asset_change_percent) %}
                     <div style="color: {{ change_color }};">{{ change_text }}</div>
@@ -247,7 +247,7 @@
                     Liabilities
                 </div>
                 <div class="section-header-total" style="display: table-cell; vertical-align: middle; text-align: right; font-size: 16px; font-weight: 600; white-space: nowrap;">
-                    <div>Total: {{ format_money(current.total_debts) }}</div>
+                    <div>Total: {{ format_money(current_total_debts) }}</div>
                     {% if previous and total_debt_change %}
                     {% set change_text, change_color = format_change({'amount': total_debt_change, 'currency': current.currency}, total_debt_change_percent) %}
                     <div style="color: {{ change_color }};">{{ change_text }}</div>

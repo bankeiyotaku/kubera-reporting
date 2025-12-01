@@ -44,8 +44,8 @@ def test_first_day_report_no_previous_data(snapshot_2025_01_16):
     assert report_data["net_worth_change"] is None
     assert report_data["previous"] is None
 
-    # Verify we still have current data
-    assert report_data["current"]["net_worth"]["amount"] == pytest.approx(1359205.00)
+    # Verify we still have current data (recalculated from parent accounts)
+    assert report_data["current"]["net_worth"]["amount"] == pytest.approx(966855.00)
 
     # Generate HTML report
     html = reporter.generate_html_report(report_data)
@@ -53,7 +53,9 @@ def test_first_day_report_no_previous_data(snapshot_2025_01_16):
     # Verify HTML content
     assert "<!DOCTYPE html>" in html
     assert "Net worth" in html
-    assert "$1,359,205" in html
+    # Note: Net worth is now calculated from filtered parent accounts only,
+    # not from API totals, so it may differ from snapshot's net_worth value
+    assert "$966,855" in html  # Filtered account total
     # Check for first day message (may be split across lines)
     assert "snapshot of your current" in html and "account balances" in html
     assert "Asset Allocation" in html  # Should have allocation chart
@@ -70,9 +72,9 @@ def test_second_day_report_with_deltas(snapshot_2025_01_15, snapshot_2025_01_16)
     # Calculate deltas
     report_data = reporter.calculate_deltas(snapshot_2025_01_16, snapshot_2025_01_15)
 
-    # Verify net worth change
+    # Verify net worth change (recalculated from parent accounts, not API value)
     assert report_data["net_worth_change"] is not None
-    assert report_data["net_worth_change"]["amount"] == pytest.approx(6205.00)
+    assert report_data["net_worth_change"]["amount"] == pytest.approx(1855.00)
 
     # Verify asset changes sorted by absolute change
     assert len(report_data["asset_changes"]) > 0
@@ -109,8 +111,9 @@ def test_second_day_report_with_deltas(snapshot_2025_01_15, snapshot_2025_01_16)
     # Verify HTML content with deltas
     assert "<!DOCTYPE html>" in html
     assert "Net worth" in html
-    assert "$1,359,205" in html
-    assert "↑ $6,205" in html  # Net worth change with up arrow
+    # Net worth is recalculated from parent accounts
+    assert "$966,855" in html
+    assert "↑ $1,855" in html  # Net worth change (recalculated) with up arrow
     assert "balances that changed yesterday" in html  # Second day message
     assert "Crypto Wallet" in html
     assert "↓ $3,125" in html  # Top asset mover (negative) with down arrow

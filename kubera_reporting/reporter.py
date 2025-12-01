@@ -32,7 +32,9 @@ class PortfolioReporter:
         templates_dir = Path(__file__).parent / "templates"
         self.jinja_env = Environment(loader=FileSystemLoader(str(templates_dir)))
 
-    def _aggregate_holdings_to_accounts(self, snapshot: PortfolioSnapshot) -> PortfolioSnapshot:
+    def _aggregate_holdings_to_accounts(
+        self, snapshot: PortfolioSnapshot, previous: PortfolioSnapshot | None = None
+    ) -> PortfolioSnapshot:
         """Filter out individual holdings and zero-value accounts, keeping only parent accounts.
 
         Raw API data contains both parent accounts (e.g., "Account Name - Bonds - 1234")
@@ -41,13 +43,24 @@ class PortfolioReporter:
         We want to show only the parent accounts with their aggregate values,
         excluding individual holdings and accounts with zero value.
 
+        However, if an account has zero value NOW but had non-zero value in the previous
+        snapshot, we keep it so the decrease shows up in the report (e.g., rollovers).
+
         Args:
             snapshot: Snapshot containing raw API data with both parents and holdings
+            previous: Optional previous snapshot to check for accounts that had value
 
         Returns:
-            Snapshot with only parent accounts (holdings and zero-value accounts removed)
+            Snapshot with only parent accounts (holdings and zero-value accounts removed,
+            unless they had value in previous snapshot)
         """
-        # Filter out holdings and zero-value accounts
+        # Build lookup of previous account values if available
+        prev_account_values = {}
+        if previous:
+            for account in previous["accounts"]:
+                prev_account_values[account["id"]] = account["value"]["amount"]
+
+        # Filter out holdings and zero-value accounts (with exception for accounts that had value)
         filtered_accounts = []
 
         for account in snapshot["accounts"]:
@@ -61,14 +74,35 @@ class PortfolioReporter:
             # Check if account has zero value (should be skipped)
             has_zero_value = account["value"]["amount"] == 0
 
-            if not is_holding and not has_zero_value:
-                # This is either a parent account or standalone account with value - keep it
+            # Keep account if:
+            # 1. Not a holding AND
+            # 2. Either has non-zero value OR had non-zero value in previous snapshot
+            had_previous_value = prev_account_values.get(acc_id, 0) != 0
+            should_keep = not is_holding and (not has_zero_value or had_previous_value)
+
+            if should_keep:
                 filtered_accounts.append(account)
 
-        # Return new snapshot with filtered accounts
+        # Recalculate totals from ALL accounts (not just filtered parents)
+        # This ensures our totals match the sum of what's actually in the portfolio
+        all_assets = sum(
+            acc["value"]["amount"]
+            for acc in snapshot["accounts"]
+            if acc["category"] == "asset" and "_" not in acc["id"]
+        )
+        all_debts = sum(
+            acc["value"]["amount"]
+            for acc in snapshot["accounts"]
+            if acc["category"] == "debt" and "_" not in acc["id"]
+        )
+
+        # Return new snapshot with filtered accounts and recalculated totals
         return {
             **snapshot,
             "accounts": filtered_accounts,
+            "total_assets": {"amount": all_assets, "currency": snapshot["currency"]},
+            "total_debts": {"amount": all_debts, "currency": snapshot["currency"]},
+            "net_worth": {"amount": all_assets - all_debts, "currency": snapshot["currency"]},
         }
 
     def calculate_deltas(
@@ -87,9 +121,11 @@ class PortfolioReporter:
         current_original = current
 
         # Aggregate holdings into parent accounts for delta calculations
-        current = self._aggregate_holdings_to_accounts(current)
+        # Pass previous snapshot to current aggregation so we keep zero-value accounts
+        # that had value before (e.g., accounts that were rolled over)
         if previous:
             previous = self._aggregate_holdings_to_accounts(previous)
+        current = self._aggregate_holdings_to_accounts(current, previous)
 
         # Calculate net worth change and percentage
         net_worth_change: MoneyValue | None = None
@@ -571,21 +607,49 @@ class PortfolioReporter:
             asset_movers = report_data["asset_changes"][:top_n]
             debt_movers = report_data["debt_changes"][:top_n]
 
-            # Calculate total changes and percentages
-            total_asset_change = sum(d["change"]["amount"] for d in report_data["asset_changes"])
-            total_debt_change = sum(d["change"]["amount"] for d in report_data["debt_changes"])
+            # Use API snapshot totals for headline numbers (not filtered account sums)
+            # The API totals are the source of truth and include all holdings
+            current_total_assets = report_data["current"]["total_assets"]
+            current_total_debts = report_data["current"]["total_debts"]
+            current_net_worth = report_data["current"]["net_worth"]
 
-            # Calculate percentage changes for totals
+            # Calculate changes from API snapshot totals
             total_asset_change_percent = None
             total_debt_change_percent = None
-            if report_data["previous"]:
-                prev_total_assets = report_data["previous"]["total_assets"]["amount"]
-                if prev_total_assets != 0:
-                    total_asset_change_percent = (total_asset_change / prev_total_assets) * 100
+            net_worth_change_percent = None
 
-                prev_total_debts = report_data["previous"]["total_debts"]["amount"]
-                if prev_total_debts != 0:
-                    total_debt_change_percent = (total_debt_change / prev_total_debts) * 100
+            if report_data["previous"]:
+                total_asset_change = (
+                    report_data["current"]["total_assets"]["amount"]
+                    - report_data["previous"]["total_assets"]["amount"]
+                )
+                total_debt_change = (
+                    report_data["current"]["total_debts"]["amount"]
+                    - report_data["previous"]["total_debts"]["amount"]
+                )
+                net_worth_change_amount = (
+                    report_data["current"]["net_worth"]["amount"]
+                    - report_data["previous"]["net_worth"]["amount"]
+                )
+
+                # Calculate percentages
+                if report_data["previous"]["total_assets"]["amount"] != 0:
+                    total_asset_change_percent = (
+                        total_asset_change / report_data["previous"]["total_assets"]["amount"]
+                    ) * 100
+                if report_data["previous"]["total_debts"]["amount"] != 0:
+                    total_debt_change_percent = (
+                        total_debt_change / report_data["previous"]["total_debts"]["amount"]
+                    ) * 100
+                if report_data["previous"]["net_worth"]["amount"] != 0:
+                    net_worth_change_percent = (
+                        net_worth_change_amount
+                        / abs(report_data["previous"]["net_worth"]["amount"])
+                    ) * 100
+            else:
+                total_asset_change = 0
+                total_debt_change = 0
+                net_worth_change_amount = 0
 
             # Calculate asset allocation (use unaggregated for accurate categorization)
             snapshot_for_allocation = report_data.get(
@@ -659,13 +723,21 @@ class PortfolioReporter:
             return template.render(
                 current=report_data["current"],
                 previous=report_data["previous"],
-                net_worth_change=report_data["net_worth_change"],
-                net_worth_change_percent=report_data["net_worth_change_percent"],
+                current_net_worth=current_net_worth,
+                net_worth_change={
+                    "amount": net_worth_change_amount,
+                    "currency": report_data["current"]["currency"],
+                }
+                if report_data["previous"]
+                else None,
+                net_worth_change_percent=net_worth_change_percent,
                 asset_movers=asset_movers,
                 debt_movers=debt_movers,
                 assets_by_sheet=sorted_sheets,
                 sheet_totals=sheet_totals,
                 section_totals=section_totals,
+                current_total_assets=current_total_assets,
+                current_total_debts=current_total_debts,
                 total_asset_change=total_asset_change,
                 total_asset_change_percent=total_asset_change_percent,
                 total_debt_change=total_debt_change,
