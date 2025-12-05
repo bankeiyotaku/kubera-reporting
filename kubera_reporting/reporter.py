@@ -540,7 +540,7 @@ class PortfolioReporter:
                     section_accounts.sort(key=lambda x: x["current_value"]["amount"], reverse=True)
 
             # Calculate totals for both sheet and section levels
-            sheet_totals = {}
+            sheet_totals: dict[str, dict[str, float | int | None]] = {}
             section_totals: dict[str, dict[str, dict[str, float | int | None]]] = defaultdict(dict)
 
             for sheet_name, sheet_sections in assets_by_sheet.items():
@@ -602,11 +602,56 @@ class PortfolioReporter:
             asset_movers = report_data["asset_changes"][:top_n]
             debt_movers = report_data["debt_changes"][:top_n]
 
+            # Validate that sum of sheet totals matches sum of displayed accounts
+            # This catches bugs where accounts are incorrectly filtered from display
+            sum_of_sheet_totals = sum(
+                sheet["total_value"]
+                for sheet in sheet_totals.values()
+                if isinstance(sheet["total_value"], (int, float))
+            )
+            sum_of_displayed_assets = sum(
+                asset["current_value"]["amount"] for asset in report_data["asset_changes"]
+            )
+            sum_of_displayed_debts = sum(
+                debt["current_value"]["amount"] for debt in report_data["debt_changes"]
+            )
+
+            # Allow small floating point differences (< $0.01)
+            asset_diff = abs(sum_of_sheet_totals - sum_of_displayed_assets)
+            if asset_diff > 0.01:
+                raise ReportGenerationError(
+                    f"Report validation failed: Sum of sheet totals (${sum_of_sheet_totals:,.2f}) "
+                    f"does not match sum of displayed assets (${sum_of_displayed_assets:,.2f}). "
+                    f"Difference: ${asset_diff:,.2f}. This indicates accounts are being "
+                    f"incorrectly filtered from the report."
+                )
+
             # Use API snapshot totals for headline numbers (not filtered account sums)
             # The API totals are the source of truth and include all holdings
             current_total_assets = report_data["current"]["total_assets"]
             current_total_debts = report_data["current"]["total_debts"]
             current_net_worth = report_data["current"]["net_worth"]
+
+            # Validate that displayed accounts match the API snapshot totals
+            # (They should match since we filter in _aggregate_holdings_to_accounts)
+            api_asset_diff = abs(current_total_assets["amount"] - sum_of_displayed_assets)
+            api_debt_diff = abs(current_total_debts["amount"] - sum_of_displayed_debts)
+
+            if api_asset_diff > 0.01:
+                raise ReportGenerationError(
+                    f"Report validation failed: API snapshot total assets "
+                    f"(${current_total_assets['amount']:,.2f}) does not match sum of "
+                    f"displayed assets (${sum_of_displayed_assets:,.2f}). "
+                    f"Difference: ${api_asset_diff:,.2f}"
+                )
+
+            if api_debt_diff > 0.01:
+                raise ReportGenerationError(
+                    f"Report validation failed: API snapshot total debts "
+                    f"(${current_total_debts['amount']:,.2f}) does not match sum of "
+                    f"displayed debts (${sum_of_displayed_debts:,.2f}). "
+                    f"Difference: ${api_debt_diff:,.2f}"
+                )
 
             # Calculate changes from API snapshot totals
             total_asset_change_percent = None
