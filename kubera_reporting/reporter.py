@@ -532,11 +532,6 @@ class PortfolioReporter:
                 # Use section_name for sub-grouping, fall back to "Default" if not available
                 section = asset.get("section_name") or "Default"
 
-                # Skip accounts whose name matches the section name (prevents double-counting)
-                # Example: parent account with same name as section shows redundant line item
-                if asset["name"] == section:
-                    continue
-
                 assets_by_sheet[sheet][section].append(asset)
 
             # Sort accounts within each section by value
