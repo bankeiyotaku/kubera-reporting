@@ -3,6 +3,66 @@
 from kubera_reporting.types import PortfolioSnapshot
 
 
+def calculate_asset_allocation_by_organization(snapshot: PortfolioSnapshot) -> dict[str, float]:
+    """Calculate asset allocation using actual portfolio organization (sheets/sections).
+    
+    Uses your actual Kubera organization structure instead of generic categories.
+    If you have sections, uses those. Otherwise uses sheet names.
+    
+    Args:
+        snapshot: Portfolio snapshot
+        
+    Returns:
+        Dictionary with allocation percentages by section/sheet name
+    """
+    categories: dict[str, float] = {}
+    
+    # First, check if we have meaningful sections (not all "No Section" or None)
+    has_sections = any(
+        acc.get("section_name") 
+        for acc in snapshot["accounts"] 
+        if acc["category"] == "asset"
+    )
+    
+    for account in snapshot["accounts"]:
+        if account["category"] != "asset":
+            continue
+            
+        # Skip parent accounts with children (to avoid double-counting)
+        account_id = account["id"]
+        if "_" not in account_id:
+            # This is a parent account - check if it has children
+            has_children = any(
+                a["id"].startswith(f"{account_id}_")
+                for a in snapshot["accounts"]
+                if a["category"] == "asset"
+            )
+            if has_children:
+                continue
+        
+        amount = account["value"]["amount"]
+        
+        # Skip zero-value accounts
+        if amount == 0:
+            continue
+        
+        # Use section if available and we have sections, otherwise use sheet
+        if has_sections and account.get("section_name"):
+            category = account["section_name"]
+        else:
+            category = account["sheet_name"] or "Uncategorized"
+        
+        if category not in categories:
+            categories[category] = 0.0
+        categories[category] += amount
+    
+    # Convert to percentages
+    total = sum(categories.values())
+    if total > 0:
+        return {k: (v / total * 100) for k, v in categories.items() if v > 0}
+    return {}
+
+
 def calculate_asset_allocation(snapshot: PortfolioSnapshot) -> dict[str, float]:
     """Calculate asset allocation by category using subType metadata from Kubera API.
 

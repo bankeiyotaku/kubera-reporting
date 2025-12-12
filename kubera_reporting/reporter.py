@@ -10,7 +10,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from kubera_reporting import currency_format, html_formatter
-from kubera_reporting.allocation import calculate_asset_allocation
+from kubera_reporting.allocation import calculate_asset_allocation_by_organization
 from kubera_reporting.chart_generator import generate_allocation_chart
 from kubera_reporting.exceptions import ReportGenerationError
 from kubera_reporting.prompts import AI_SUMMARY_PROMPT_NO_AMOUNTS, AI_SUMMARY_PROMPT_WITH_AMOUNTS
@@ -31,28 +31,33 @@ class PortfolioReporter:
         # Get the templates directory relative to this file
         templates_dir = Path(__file__).parent / "templates"
         self.jinja_env = Environment(loader=FileSystemLoader(str(templates_dir)))
+        self._chart_bytes: bytes | None = None
+    
+    def get_chart_bytes(self) -> bytes | None:
+        """Get chart bytes from last generate_html_report call.
+        
+        Returns:
+            Chart image bytes if a chart was generated, None otherwise
+        """
+        return self._chart_bytes
 
     def _aggregate_holdings_to_accounts(
-        self, snapshot: PortfolioSnapshot, previous: PortfolioSnapshot | None = None
+        self, snapshot: PortfolioSnapshot, previous: PortfolioSnapshot | None = None,
+        filter_holdings: bool = False
     ) -> PortfolioSnapshot:
-        """Filter out individual holdings and zero-value accounts, keeping only parent accounts.
+        """Process accounts, optionally filtering out individual holdings.
 
         Raw API data contains both parent accounts (e.g., "Account Name - Bonds - 1234")
         and their individual holdings (e.g., 500 stocks with IDs like {uuid}_isin-xxx).
 
-        We want to show only the parent accounts with their aggregate values,
-        excluding individual holdings and accounts with zero value.
-
-        However, if an account has zero value NOW but had non-zero value in the previous
-        snapshot, we keep it so the decrease shows up in the report (e.g., rollovers).
-
         Args:
             snapshot: Snapshot containing raw API data with both parents and holdings
             previous: Optional previous snapshot to check for accounts that had value
+            filter_holdings: If True, filter out individual holdings and keep only parent accounts.
+                            If False, keep all accounts for detailed reporting.
 
         Returns:
-            Snapshot with only parent accounts (holdings and zero-value accounts removed,
-            unless they had value in previous snapshot)
+            Snapshot with processed accounts
         """
         # Build lookup of previous account values if available
         prev_account_values = {}
@@ -60,13 +65,13 @@ class PortfolioReporter:
             for account in previous["accounts"]:
                 prev_account_values[account["id"]] = account["value"]["amount"]
 
-        # Filter out holdings and zero-value accounts (with exception for accounts that had value)
+        # Filter accounts based on filter_holdings parameter
         filtered_accounts = []
 
         for account in snapshot["accounts"]:
             acc_id = account["id"]
 
-            # Check if this is a holding (should be skipped)
+            # Check if this is a holding (has underscore in ID)
             # All holdings have underscore in ID (parent_child pattern)
             # Parent accounts are pure UUIDs without underscores
             is_holding = "_" in acc_id
@@ -74,14 +79,20 @@ class PortfolioReporter:
             # Check if account has zero value (should be skipped)
             has_zero_value = account["value"]["amount"] == 0
 
-            # Keep account if:
-            # 1. Not a holding AND
-            # 2. Either has non-zero value OR had non-zero value in previous snapshot
-            had_previous_value = prev_account_values.get(acc_id, 0) != 0
-            should_keep = not is_holding and (not has_zero_value or had_previous_value)
+            # Determine if we should keep this account
+            if filter_holdings:
+                # Legacy mode: Keep only parent accounts with non-zero value
+                # (or accounts that had previous value)
+                had_previous_value = prev_account_values.get(acc_id, 0) != 0
+                should_keep = not is_holding and (not has_zero_value or had_previous_value)
+            else:
+                # Detailed mode: Keep all accounts (parents and holdings) with non-zero value
+                should_keep = not has_zero_value
 
             if should_keep:
-                filtered_accounts.append(account)
+                # Add is_holding flag to account for downstream processing
+                account_with_flag = {**account, "is_holding": is_holding}
+                filtered_accounts.append(account_with_flag)
 
         # Recalculate totals from ALL accounts (not just filtered parents)
         # This ensures our totals match the sum of what's actually in the portfolio
@@ -120,12 +131,11 @@ class PortfolioReporter:
         # Save original snapshot for allocation (needs child holdings with detailed subTypes)
         current_original = current
 
-        # Aggregate holdings into parent accounts for delta calculations
-        # Pass previous snapshot to current aggregation so we keep zero-value accounts
-        # that had value before (e.g., accounts that were rolled over)
+        # Process accounts - keep detailed holdings for comprehensive reporting
+        # Pass filter_holdings=False to keep all holdings visible in the report
         if previous:
-            previous = self._aggregate_holdings_to_accounts(previous)
-        current = self._aggregate_holdings_to_accounts(current, previous)
+            previous = self._aggregate_holdings_to_accounts(previous, filter_holdings=False)
+        current = self._aggregate_holdings_to_accounts(current, previous, filter_holdings=False)
 
         # Calculate net worth change and percentage
         net_worth_change: MoneyValue | None = None
@@ -174,6 +184,7 @@ class PortfolioReporter:
                     "previous_value": prev_account["value"],
                     "change": {"amount": change_amount, "currency": current["currency"]},
                     "change_percent": change_percent,
+                    "is_holding": account.get("is_holding", False),
                 }
             else:
                 # New account
@@ -192,6 +203,7 @@ class PortfolioReporter:
                     "previous_value": {"amount": 0.0, "currency": current["currency"]},
                     "change": account["value"],
                     "change_percent": None,
+                    "is_holding": account.get("is_holding", False),
                 }
 
             if account["category"] == "asset":
@@ -391,7 +403,7 @@ class PortfolioReporter:
             snapshot_for_allocation = report_data.get(
                 "current_unaggregated", report_data["current"]
             )
-            allocation = calculate_asset_allocation(snapshot_for_allocation)
+            allocation = calculate_asset_allocation_by_organization(snapshot_for_allocation)
 
             # Build comprehensive portfolio data for prompt
             # Round allocation percentages to 2 decimal places
@@ -503,7 +515,7 @@ class PortfolioReporter:
         hide_amounts: bool = False,
         is_export: bool = False,
     ) -> str:
-        """Generate HTML email report with embedded base64 charts for better forwarding.
+        """Generate HTML email report with embedded charts.
 
         Args:
             report_data: Report data
@@ -512,10 +524,10 @@ class PortfolioReporter:
             ai_summary: Optional AI-generated summary
             recipient_name: Optional name for greeting (default: "Portfolio Report")
             hide_amounts: If True, mask dollar amounts (show "$XX" instead)
-            is_export: If True, add collapse/expand functionality for local viewing (default: False)
+            is_export: If True, add collapse/expand functionality and use base64 for charts
 
         Returns:
-            HTML report string with inline styles and base64-embedded charts
+            HTML report string
 
         Raises:
             ReportGenerationError: If generation fails
@@ -534,10 +546,16 @@ class PortfolioReporter:
 
                 assets_by_sheet[sheet][section].append(asset)
 
-            # Sort accounts within each section by value
+            # Sort accounts within each section
+            # Group parent accounts first, then holdings alphabetically
             for sheet_sections in assets_by_sheet.values():
                 for section_accounts in sheet_sections.values():
-                    section_accounts.sort(key=lambda x: x["current_value"]["amount"], reverse=True)
+                    section_accounts.sort(
+                        key=lambda x: (
+                            x.get("is_holding", False),  # Parents first (False < True)
+                            -x["current_value"]["amount"]  # Then by value descending
+                        )
+                    )
 
             # Calculate totals for both sheet and section levels
             sheet_totals: dict[str, dict[str, float | int | None]] = {}
@@ -551,13 +569,15 @@ class PortfolioReporter:
 
                 for section_name, accounts in sheet_sections.items():
                     # Calculate section-level totals
-                    section_current = sum(a["current_value"]["amount"] for a in accounts)
+                    # Only sum parent accounts to avoid double-counting (holdings are children of parents)
+                    parent_accounts = [a for a in accounts if not a.get("is_holding", False)]
+                    section_current = sum(a["current_value"]["amount"] for a in parent_accounts)
                     section_change = (
-                        sum(a["change"]["amount"] for a in accounts)
+                        sum(a["change"]["amount"] for a in parent_accounts)
                         if report_data["previous"]
                         else None
                     )
-                    section_previous = sum(a["previous_value"]["amount"] for a in accounts)
+                    section_previous = sum(a["previous_value"]["amount"] for a in parent_accounts)
 
                     # Calculate section percentage change
                     section_change_percent = None
@@ -602,18 +622,23 @@ class PortfolioReporter:
             asset_movers = report_data["asset_changes"][:top_n]
             debt_movers = report_data["debt_changes"][:top_n]
 
-            # Validate that sum of sheet totals matches sum of displayed accounts
-            # This catches bugs where accounts are incorrectly filtered from display
+            # Validate that sum of sheet totals matches sum of displayed PARENT accounts
+            # (excluding holdings to avoid double-counting)
             sum_of_sheet_totals = sum(
                 sheet["total_value"]
                 for sheet in sheet_totals.values()
                 if isinstance(sheet["total_value"], (int, float))
             )
+            # Only sum parent accounts for validation
             sum_of_displayed_assets = sum(
-                asset["current_value"]["amount"] for asset in report_data["asset_changes"]
+                asset["current_value"]["amount"] 
+                for asset in report_data["asset_changes"]
+                if not asset.get("is_holding", False)
             )
             sum_of_displayed_debts = sum(
-                debt["current_value"]["amount"] for debt in report_data["debt_changes"]
+                debt["current_value"]["amount"] 
+                for debt in report_data["debt_changes"]
+                if not debt.get("is_holding", False)
             )
 
             # Allow small floating point differences (< $0.01)
@@ -621,7 +646,7 @@ class PortfolioReporter:
             if asset_diff > 0.01:
                 raise ReportGenerationError(
                     f"Report validation failed: Sum of sheet totals (${sum_of_sheet_totals:,.2f}) "
-                    f"does not match sum of displayed assets (${sum_of_displayed_assets:,.2f}). "
+                    f"does not match sum of displayed parent assets (${sum_of_displayed_assets:,.2f}). "
                     f"Difference: ${asset_diff:,.2f}. This indicates accounts are being "
                     f"incorrectly filtered from the report."
                 )
@@ -695,14 +720,23 @@ class PortfolioReporter:
             snapshot_for_allocation = report_data.get(
                 "current_unaggregated", report_data["current"]
             )
-            allocation = calculate_asset_allocation(snapshot_for_allocation)
+            allocation = calculate_asset_allocation_by_organization(snapshot_for_allocation)
 
-            # Always embed chart as base64 data URL for better forwarding compatibility
+            # Generate chart and embed it
             chart_src = ""
+            self._chart_bytes = None  # Store for later retrieval
             if allocation:
                 chart_bytes = generate_allocation_chart(allocation)
-                chart_b64 = base64.b64encode(chart_bytes).decode("utf-8")
-                chart_src = f"data:image/png;base64,{chart_b64}"
+                self._chart_bytes = chart_bytes
+                
+                # For export: use base64 data URI (works in browsers)
+                # For email: use CID reference (more reliable in email clients)
+                if is_export:
+                    chart_b64 = base64.b64encode(chart_bytes).decode("utf-8")
+                    chart_src = f"data:image/png;base64,{chart_b64}"
+                else:
+                    # Use CID for email
+                    chart_src = "cid:chart_image"
 
             # Format greeting based on recipient name and report type
             if recipient_name:
@@ -793,5 +827,8 @@ class PortfolioReporter:
                 format_change=format_change_wrapper,
                 is_export=is_export,
             )
+            
+            return html
+            
         except Exception as e:
             raise ReportGenerationError(f"Failed to generate HTML report: {e}") from e

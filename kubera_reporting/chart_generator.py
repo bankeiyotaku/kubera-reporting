@@ -18,19 +18,39 @@ def generate_allocation_chart(allocation: dict[str, float]) -> bytes:
     Returns:
         PNG image as bytes
     """
-    # Define colors for each category
+    # Define colors for common categories (both generic and custom names)
     colors = {
+        # Generic categories
         "Stocks": "#4CAF50",  # Green
         "Bonds": "#2196F3",  # Blue
         "Crypto": "#FF9800",  # Orange
         "Real Estate": "#9C27B0",  # Purple
         "Cash": "#00BCD4",  # Cyan
         "Other": "#795548",  # Brown
+        # Common custom categories (case-insensitive matching)
+        "stock positions": "#4CAF50",  # Green
+        "credit investments": "#2196F3",  # Blue
+        "debt investments": "#2196F3",  # Blue
+        "fixed income": "#2196F3",  # Blue
+        "cash": "#00BCD4",  # Cyan
+        "cash equivalents": "#00BCD4",  # Cyan
+        "alternatives": "#FF9800",  # Orange
+        "private equity": "#9C27B0",  # Purple
+        "real estate": "#E91E63",  # Pink
+        "commodities": "#FFC107",  # Amber
     }
 
     labels = list(allocation.keys())
     values = list(allocation.values())
-    chart_colors = [colors.get(label, "#999999") for label in labels]
+    
+    # Match colors case-insensitively, use a vibrant color palette if no match
+    default_colors = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0", "#00BCD4", "#E91E63", "#FFC107", "#795548"]
+    chart_colors = []
+    for i, label in enumerate(labels):
+        color = colors.get(label) or colors.get(label.lower())
+        if not color:
+            color = default_colors[i % len(default_colors)]
+        chart_colors.append(color)
 
     # Create figure with better layout
     fig, ax = plt.subplots(figsize=(10, 7))

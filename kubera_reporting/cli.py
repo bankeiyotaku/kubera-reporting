@@ -79,7 +79,7 @@ def _generate_and_send_report(
         if ai_summary:
             console.print(f"[green]✓[/green] AI insights generated for {report_type.value} report")
 
-    # Generate HTML report with embedded chart (base64 for better forwarding)
+    # Generate HTML report
     html_report = reporter.generate_html_report(
         report_data,
         report_type=report_type,
@@ -87,6 +87,9 @@ def _generate_and_send_report(
         recipient_name=recipient_name,
         hide_amounts=hide_amounts,
     )
+    
+    # Get chart bytes for CID embedding
+    chart_bytes = reporter.get_chart_bytes()
 
     console.print(f"[green]✓[/green] {report_type.value.capitalize()} report generated")
 
@@ -111,7 +114,7 @@ def _generate_and_send_report(
         period_desc = period_descriptions.get(report_type, "balance activity")
         subject = f"Your portfolio {period_desc} for {report_date_str}"
 
-        emailer.send_html_email(subject, html_report)
+        emailer.send_html_email(subject, html_report, chart_image=chart_bytes)
         console.print(f"[green]✓[/green] {report_type.value.capitalize()} report sent to {email}")
 
 
@@ -299,7 +302,9 @@ def report(
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
     except Exception as e:
+        import traceback
         console.print(f"[red]Unexpected error:[/red] {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -922,19 +927,21 @@ def send_sample(email: str | None, name: str | None) -> None:
             "considering a tactical reduction if it persists."
         )
 
-        # Generate HTML report with embedded base64 chart
+        # Generate HTML report
         html_content = reporter.generate_html_report(
             report_data,
             ai_summary=ai_summary,
             recipient_name=name or "Investor",
         )
-        console.print("[green]✓[/green] Generated HTML report with embedded chart")
+        chart_bytes = reporter.get_chart_bytes()
+        console.print("[green]✓[/green] Generated HTML report with chart")
 
         # Send email
         emailer = EmailSender(recipient=email)
         emailer.send_html_email(
             subject="Sample Kubera Portfolio Report (Daily)",
             html_content=html_content,
+            chart_image=chart_bytes,
         )
 
         console.print(f"\n[bold green]✓ Email sent successfully to {email}![/bold green]")

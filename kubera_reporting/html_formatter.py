@@ -41,21 +41,16 @@ def format_money(value: MoneyValue, hide_amounts: bool = False) -> str:
 
 
 def format_net_worth(value: MoneyValue, hide_amounts: bool = False) -> str:
-    """Format net worth value with FIRE category indicator.
+    """Format net worth value.
 
     Args:
         value: Net worth value
-        hide_amounts: If True, mask the dollar amount but keep FIRE category
+        hide_amounts: If True, mask the dollar amount
 
     Returns:
-        Formatted string like "$1,234,567 (Fat FIRE)" or "$750,000" or "$XX (Fat FIRE)"
+        Formatted string like "$1,234,567"
     """
-    formatted_money = format_money(value, hide_amounts=hide_amounts)
-    category = get_fire_category(value["amount"])
-
-    if category:
-        return f"{formatted_money} ({category})"
-    return formatted_money
+    return format_money(value, hide_amounts=hide_amounts)
 
 
 def format_change(

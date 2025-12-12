@@ -1,6 +1,8 @@
-"""Send email reports via local mail command."""
+"""Send email reports via SMTP."""
 
-import subprocess
+import os
+import smtplib
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -8,7 +10,7 @@ from kubera_reporting.exceptions import EmailError
 
 
 class EmailSender:
-    """Sends emails via local mail command."""
+    """Sends emails via SMTP."""
 
     def __init__(self, recipient: str) -> None:
         """Initialize email sender.
@@ -17,65 +19,70 @@ class EmailSender:
             recipient: Email address to send to
         """
         self.recipient = recipient
+        self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        self.smtp_user = os.getenv("SMTP_USERNAME")
+        self.smtp_password = os.getenv("SMTP_PASSWORD")
 
     def send_html_email(
         self,
         subject: str,
         html_content: str,
         from_address: str | None = None,
+        chart_image: bytes | None = None,
     ) -> None:
-        """Send HTML email via local mail command.
-
-        Charts are now embedded as base64 data URLs in the HTML for better forwarding compatibility.
+        """Send HTML email via SMTP with optional embedded chart image.
 
         Args:
             subject: Email subject
-            html_content: HTML content with inline styles and base64-embedded images
-            from_address: From address (optional)
+            html_content: HTML content
+            from_address: From address (optional, defaults to SMTP_USERNAME)
+            chart_image: Optional PNG chart image bytes to embed via CID
 
         Raises:
             EmailError: If sending fails
         """
+        if not self.smtp_user or not self.smtp_password:
+            raise EmailError(
+                "SMTP credentials not found. Please set SMTP_USERNAME and SMTP_PASSWORD environment variables."
+            )
+
         try:
-            # Create MIME multipart message for text and HTML alternatives
-            msg = MIMEMultipart("alternative")
+            # Create MIME multipart message
+            # Use 'related' if we have images to embed, otherwise 'alternative'
+            msg_type = "related" if chart_image else "alternative"
+            msg = MIMEMultipart(msg_type)
             msg["Subject"] = subject
             msg["To"] = self.recipient
+            msg["From"] = from_address or self.smtp_user
 
-            if from_address:
-                msg["From"] = from_address
+            # Create alternative container for text/html
+            if chart_image:
+                msg_alternative = MIMEMultipart("alternative")
+                msg.attach(msg_alternative)
+            else:
+                msg_alternative = msg
 
             # Create plain text version (fallback)
             text_content = "This email requires an HTML-capable email client."
             text_part = MIMEText(text_content, "plain", "utf-8")
             html_part = MIMEText(html_content, "html", "utf-8")
 
-            # Attach parts (text first, then HTML as per RFC 2046)
-            msg.attach(text_part)
-            msg.attach(html_part)
+            msg_alternative.attach(text_part)
+            msg_alternative.attach(html_part)
 
-            # Send via sendmail command (more reliable than mail on macOS)
-            sendmail_cmd = ["/usr/sbin/sendmail", "-t", "-oi"]
+            # Attach chart image with Content-ID if provided
+            if chart_image:
+                image = MIMEImage(chart_image, "png")
+                image.add_header("Content-ID", "<chart_image>")
+                image.add_header("Content-Disposition", "inline", filename="chart.png")
+                msg.attach(image)
 
-            result = subprocess.run(
-                sendmail_cmd,
-                input=msg.as_string(),
-                text=True,
-                capture_output=True,
-                timeout=30,
-            )
+            # Send via SMTP
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.starttls()
+                server.login(self.smtp_user, self.smtp_password)
+                server.send_message(msg)
 
-            if result.returncode != 0:
-                raise EmailError(
-                    f"Sendmail command failed with return code {result.returncode}: {result.stderr}"
-                )
-
-        except subprocess.TimeoutExpired as e:
-            raise EmailError("Sendmail command timed out") from e
-        except FileNotFoundError as e:
-            raise EmailError(
-                "Sendmail command not found at /usr/sbin/sendmail. "
-                "Please ensure mail system is configured."
-            ) from e
         except Exception as e:
-            raise EmailError(f"Failed to send email: {e}") from e
+            raise EmailError(f"Failed to send email via SMTP: {e}") from e
